@@ -7,6 +7,7 @@ import json
 import base64
 import glob
 import time
+import datetime
 
 # Page Configuration
 st.set_page_config(
@@ -35,7 +36,14 @@ def get_template_path():
         return xlsx_files[0]
     return "Fuel Reimbursement Claim Form new- Original - Copy.xlsx.xlsx"
 
-# Parse single receipt using Groq Vision API (Strictly capturing credit card / actual payment amount)
+# Automatically calculate last month (e.g., September 2026 if current is October 2026)
+def get_last_month_str():
+    today = datetime.date.today()
+    first_day = today.replace(day=1)
+    last_month = first_day - datetime.timedelta(days=1)
+    return last_month.strftime("%B %Y")
+
+# Parse single receipt using Groq Vision API (Robust JSON cleaning to prevent errors)
 def parse_receipt_with_groq(image_bytes, api_key):
     try:
         client = Groq(api_key=api_key)
@@ -70,9 +78,20 @@ def parse_receipt_with_groq(image_bytes, api_key):
             ],
             response_format={"type": "json_object"}
         )
-        return json.loads(chat_completion.choices[0].message.content)
+        
+        content = chat_completion.choices[0].message.content.strip()
+        # Clean markdown code blocks if present
+        if content.startswith("```json"):
+            content = content[7:]
+        if content.startswith("```"):
+            content = content[3:]
+        if content.endswith("```"):
+            content = content[:-3]
+        content = content.strip()
+        
+        return json.loads(content)
     except Exception as e:
-        return {"receipt_no": "Error", "litres": 0.0, "amount_rm": 0.0}
+        return {"receipt_no": "-", "litres": 0.0, "amount_rm": 0.0}
 
 # Generate Excel Claim File supporting multiple rows starting from row 15
 def generate_excel_claim(profile_data, claim_data_list):
@@ -106,6 +125,8 @@ def generate_excel_claim(profile_data, claim_data_list):
     output.seek(0)
     return output
 
+default_month_value = get_last_month_str()
+
 # ==================== 1. Colleague Portal ====================
 if portal_mode == "👥 Colleague Portal":
     st.title("👥 Fuel Reimbursement Claim Form - Colleague Portal")
@@ -122,7 +143,7 @@ if portal_mode == "👥 Colleague Portal":
             c_vehicle = st.text_input("Vehicle No.")
             c_limit = st.number_input("Monthly Claim Limit (RM)", value=500.0)
         
-        c_month = st.text_input("Claim for the Month of (e.g., October 2026)")
+        c_month = st.text_input("Claim for the Month of", value=default_month_value)
         uploaded_files = st.file_uploader("Upload Receipt Images (Multiple allowed, up to 20)", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
         
         submitted = st.form_submit_button("🤖 Batch Process & Generate Claim")
@@ -198,7 +219,7 @@ elif portal_mode == "🔑 Owner Portal":
             my_vehicle = st.text_input("Vehicle No.", value="VKG4113")
             my_limit = st.number_input("Monthly Claim Limit (RM)", value=800.0)
             
-        my_month = st.text_input("Claim for the Month of", value="October 2026")
+        my_month = st.text_input("Claim for the Month of", value=default_month_value)
         
         st.markdown("---")
         my_uploaded_files = st.file_uploader("Upload Fuel Receipts (Multiple allowed, up to 20)", type=["jpg", "jpeg", "png"], accept_multiple_files=True, key="my_receipts")
