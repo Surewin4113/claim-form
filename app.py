@@ -32,10 +32,10 @@ portal_mode = st.sidebar.radio("Select Portal", ["👥 Colleague Portal", "🔑 
 def get_template_path():
     xlsx_files = glob.glob("*.xlsx")
     if xlsx_files:
-        return xlsx_files[0]  # Automatically picks up the uploaded excel file
+        return xlsx_files[0]
     return "Fuel Reimbursement Claim Form new- Original - Copy.xlsx.xlsx"
 
-# Parse receipt using Groq Vision API
+# Parse receipt using Groq Vision API (Updated to latest supported model)
 def parse_receipt_with_groq(image_bytes, api_key):
     try:
         client = Groq(api_key=api_key)
@@ -53,7 +53,7 @@ def parse_receipt_with_groq(image_bytes, api_key):
         """
         
         chat_completion = client.chat.completions.create(
-            model="llama-3.2-90b-vision-preview",
+            model="meta-llama/llama-3.2-90b-vision-instruct", # Updated to current active model
             messages=[
                 {
                     "role": "user",
