@@ -44,7 +44,7 @@ def get_last_month_str():
     last_month = first_day - datetime.timedelta(days=1)
     return last_month.strftime("%B %Y")
 
-# Parse receipt with Groq Vision API (Removed unsupported response_format for vision model)
+# Parse receipt with Groq Vision API using qwen/qwen3.8-27b
 def parse_receipt_with_groq(image_bytes, api_key):
     max_retries = 3
     for attempt in range(max_retries):
@@ -64,7 +64,7 @@ def parse_receipt_with_groq(image_bytes, api_key):
             """
             
             chat_completion = client.chat.completions.create(
-                model="llama-3.2-11b-vision-preview",
+                model="qwen/qwen3.8-27b",
                 messages=[
                     {
                         "role": "user",
@@ -332,7 +332,7 @@ elif portal_mode == "🔑 Owner Portal":
 
         if "my_raw_claims" in st.session_state and st.session_state.my_raw_claims:
             st.markdown("### 📊 Batch Extraction Preview & Editor")
-            st.info("💡 **Tip**: Review the extracted data. If needed, you can click and edit any cell directly before downloading.")
+            st.info("💡 **Tip**: If any row shows an API error or missing data, you can directly click and type the correct values in the table below.")
             
             _, initial_processed_my = generate_excel_claim(st.session_state.my_profile, st.session_state.my_raw_claims)
             
