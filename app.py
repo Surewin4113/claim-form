@@ -43,7 +43,7 @@ def get_last_month_str():
     last_month = first_day - datetime.timedelta(days=1)
     return last_month.strftime("%B %Y")
 
-# Parse receipt with automatic retry mechanism if fields are missing or 0
+# Parse receipt with robust auto-retry if litres is 0 or missing
 def parse_receipt_with_groq(image_bytes, api_key):
     max_retries = 3
     for attempt in range(max_retries):
@@ -59,11 +59,11 @@ def parse_receipt_with_groq(image_bytes, api_key):
               "receipt_no": "The transaction reference number or receipt number usually located near the top (e.g., 8425439_20260830_IPFI295)",
               "litres": 0.00
             }
-            Return ONLY valid JSON. Ensure receipt_no is fully extracted and litres is a number greater than 0.
+            Return ONLY valid JSON. Ensure litres is extracted as a number greater than 0.
             """
             
             chat_completion = client.chat.completions.create(
-                model="qwen/qwen3.8-27b",
+                model="llama-3.2-11b-vision-preview",
                 messages=[
                     {
                         "role": "user",
@@ -92,20 +92,26 @@ def parse_receipt_with_groq(image_bytes, api_key):
             
             data = json.loads(content)
             r_no = str(data.get("receipt_no", "")).strip()
+            date_val = str(data.get("date", "")).strip()
             try:
                 litres = float(data.get("litres", 0) or 0)
             except:
                 litres = 0.0
             
-            # Check if valid (not missing or zero)
-            if r_no and r_no != "-" and r_no != "null" and r_no != "Error" and litres > 0:
+            # If litres is successfully read (> 0), return valid data
+            if litres > 0:
+                if not r_no or r_no in ["-", "null", "None", ""]:
+                    data["receipt_no"] = "-"
+                if not date_val or date_val in ["-", "null", "None", ""]:
+                    data["date"] = "-"
                 return data
             else:
+                # If litres is 0, retry
                 if attempt < max_retries - 1:
-                    time.sleep(1) # Wait 1 second before retrying OCR
+                    time.sleep(1)
                     continue
                 else:
-                    return data
+                    return {"date": date_val if date_val else "-", "receipt_no": r_no if r_no else "-", "litres": litres}
         except Exception as e:
             if attempt < max_retries - 1:
                 time.sleep(1)
@@ -184,7 +190,7 @@ last_month_value = get_last_month_str()
 # ==================== 1. Colleague Portal ====================
 if portal_mode == "👥 Colleague Portal":
     st.title("👥 Fuel Reimbursement Claim Form - Colleague Portal")
-    st.markdown("Please enter your personal details and **upload up to 20 receipt images**. Automatic retry ensures zero missing data.")
+    st.markdown("Please enter your personal details and **upload up to 20 receipt images**. Automatic retry ensures no zero values.")
 
     with st.form("colleague_form"):
         col1, col2 = st.columns(2)
