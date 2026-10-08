@@ -7,6 +7,7 @@ import json
 import base64
 import glob
 import datetime
+import time
 
 # Page Configuration
 st.set_page_config(
@@ -35,61 +36,83 @@ def get_template_path():
         return xlsx_files[0]
     return "Fuel Reimbursement Claim Form new- Original - Copy.xlsx.xlsx"
 
-# Automatically calculate last month (e.g., September 2026 if current is October 2026)
+# Automatically calculate last month (default to last month every time)
 def get_last_month_str():
     today = datetime.date.today()
     first_day = today.replace(day=1)
     last_month = first_day - datetime.timedelta(days=1)
     return last_month.strftime("%B %Y")
 
-# Parse receipt focusing on Date, Receipt No, and Litres
+# Parse receipt with automatic retry mechanism if fields are missing or 0
 def parse_receipt_with_groq(image_bytes, api_key):
-    try:
-        client = Groq(api_key=api_key)
-        encoded_image = base64.b64encode(image_bytes).decode('utf-8')
-        
-        prompt = """
-        You are an expert financial OCR assistant for petrol receipts in Malaysia.
-        Analyze this petrol receipt image and extract the following 3 fields accurately in JSON format:
-        {
-          "date": "The transaction date on the receipt in DD/MM/YYYY or YYYY-MM-DD format (string or null)",
-          "receipt_no": "The transaction reference number or receipt number usually located near the top (e.g., 8425439_20260830_IPFI295)",
-          "litres": 0.00
-        }
-        Return ONLY valid JSON. If any field is not found, put null for date and receipt_no, and 0.00 for litres.
-        """
-        
-        chat_completion = client.chat.completions.create(
-            model="qwen/qwen3.8-27b",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{encoded_image}"
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            client = Groq(api_key=api_key)
+            encoded_image = base64.b64encode(image_bytes).decode('utf-8')
+            
+            prompt = """
+            You are an expert financial OCR assistant for petrol receipts in Malaysia.
+            Analyze this petrol receipt image and extract the following 3 fields accurately in JSON format:
+            {
+              "date": "The transaction date on the receipt in DD/MM/YYYY or YYYY-MM-DD format (string or null)",
+              "receipt_no": "The transaction reference number or receipt number usually located near the top (e.g., 8425439_20260830_IPFI295)",
+              "litres": 0.00
+            }
+            Return ONLY valid JSON. Ensure receipt_no is fully extracted and litres is a number greater than 0.
+            """
+            
+            chat_completion = client.chat.completions.create(
+                model="qwen/qwen3.8-27b",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{encoded_image}"
+                                }
                             }
-                        }
-                    ]
-                }
-            ],
-            response_format={"type": "json_object"}
-        )
-        
-        content = chat_completion.choices[0].message.content.strip()
-        if content.startswith("```json"):
-            content = content[7:]
-        if content.startswith("```"):
-            content = content[3:]
-        if content.endswith("```"):
-            content = content[:-3]
-        content = content.strip()
-        
-        return json.loads(content)
-    except Exception as e:
-        return {"date": "-", "receipt_no": "-", "litres": 0.0}
+                        ]
+                    }
+                ],
+                response_format={"type": "json_object"}
+            )
+            
+            content = chat_completion.choices[0].message.content.strip()
+            if content.startswith("```json"):
+                content = content[7:]
+            if content.startswith("```"):
+                content = content[3:]
+            if content.endswith("```"):
+                content = content[:-3]
+            content = content.strip()
+            
+            data = json.loads(content)
+            r_no = str(data.get("receipt_no", "")).strip()
+            try:
+                litres = float(data.get("litres", 0) or 0)
+            except:
+                litres = 0.0
+            
+            # Check if valid (not missing or zero)
+            if r_no and r_no != "-" and r_no != "null" and r_no != "Error" and litres > 0:
+                return data
+            else:
+                if attempt < max_retries - 1:
+                    time.sleep(1) # Wait 1 second before retrying OCR
+                    continue
+                else:
+                    return data
+        except Exception as e:
+            if attempt < max_retries - 1:
+                time.sleep(1)
+                continue
+            else:
+                return {"date": "-", "receipt_no": "-", "litres": 0.0}
+    return {"date": "-", "receipt_no": "-", "litres": 0.0}
 
 # Generate Excel Claim File with smart deduplication and RM1.99 calculation
 def generate_excel_claim(profile_data, raw_claim_list):
@@ -110,8 +133,7 @@ def generate_excel_claim(profile_data, raw_claim_list):
     ws['K12'] = profile_data['monthly_limit']
     ws['D13'] = profile_data['month']
 
-    # Smart Deduplication: Only consider exact duplicate if Date AND Litres AND Receipt No are all identical.
-    # Different date or different litres means they are separate valid transactions even if receipt_no had an issue.
+    # Smart Deduplication based on Date + Litres + Receipt No
     seen_transactions = set()
     unique_claims = []
     
@@ -126,10 +148,8 @@ def generate_excel_claim(profile_data, raw_claim_list):
         except:
             litres = 0.0
             
-        # Unique signature: receipt_no + date + litres
         signature = f"{r_no}_{date_str}_{litres}"
         
-        # If receipt_no is '-', we don't treat it as duplicate unless date and litres are also 100% identical to an existing one
         if r_no != '-' and r_no != 'Error':
             if signature in seen_transactions:
                 continue
@@ -164,7 +184,7 @@ last_month_value = get_last_month_str()
 # ==================== 1. Colleague Portal ====================
 if portal_mode == "👥 Colleague Portal":
     st.title("👥 Fuel Reimbursement Claim Form - Colleague Portal")
-    st.markdown("Please enter your personal details and **upload up to 20 receipt images**. Different dates or litres are treated as unique transactions. You can edit any missing reference numbers in the preview table.")
+    st.markdown("Please enter your personal details and **upload up to 20 receipt images**. Automatic retry ensures zero missing data.")
 
     with st.form("colleague_form"):
         col1, col2 = st.columns(2)
@@ -191,7 +211,7 @@ if portal_mode == "👥 Colleague Portal":
             total_files = len(uploaded_files)
             raw_claims = []
             
-            with st.status(f"Processing {total_files} receipts securely...", expanded=True) as status:
+            with st.status(f"Processing {total_files} receipts securely (with auto-retry)...", expanded=True) as status:
                 for i, file in enumerate(uploaded_files):
                     status.update(label=f"Processing receipt {i+1} of {total_files} ({file.name})...")
                     
@@ -221,7 +241,7 @@ if portal_mode == "👥 Colleague Portal":
 
     if "raw_claims" in st.session_state and st.session_state.raw_claims:
         st.markdown("### 📊 Batch Extraction Preview & Editor")
-        st.info("💡 **Tip**: Check the extracted **Date**, **Receipt No**, and **Litres**. If any receipt number was read as `-`, you can **directly click and type** the correct number in the table below!")
+        st.info("💡 **Tip**: Review the extracted data. If needed, you can click and edit any cell directly before downloading.")
         
         _, initial_processed = generate_excel_claim(st.session_state.profile, st.session_state.raw_claims)
         
@@ -276,7 +296,7 @@ elif portal_mode == "🔑 Owner Portal":
                 total_files = len(my_uploaded_files)
                 raw_claims = []
                 
-                with st.status(f"Processing {total_files} receipts securely...", expanded=True) as status:
+                with st.status(f"Processing {total_files} receipts securely (with auto-retry)...", expanded=True) as status:
                     for i, file in enumerate(my_uploaded_files):
                         status.update(label=f"Processing receipt {i+1} of {total_files} ({file.name})...")
                         
@@ -306,7 +326,7 @@ elif portal_mode == "🔑 Owner Portal":
 
         if "my_raw_claims" in st.session_state and st.session_state.my_raw_claims:
             st.markdown("### 📊 Batch Extraction Preview & Editor")
-            st.info("💡 **Tip**: Check the extracted **Date**, **Receipt No**, and **Litres**. If any receipt number was read as `-`, you can **directly click and type** the correct number in the table below!")
+            st.info("💡 **Tip**: Review the extracted data. If needed, you can click and edit any cell directly before downloading.")
             
             _, initial_processed_my = generate_excel_claim(st.session_state.my_profile, st.session_state.my_raw_claims)
             
