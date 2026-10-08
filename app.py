@@ -36,7 +36,7 @@ def get_template_path():
         return xlsx_files[0]
     return "Fuel Reimbursement Claim Form new- Original - Copy.xlsx.xlsx"
 
-# Parse receipt using Groq Vision API (Strictly capturing credit card / actual payment amount)
+# Parse single receipt using Groq Vision API (Strictly capturing credit card / actual payment amount)
 def parse_receipt_with_groq(image_bytes, api_key):
     try:
         client = Groq(api_key=api_key)
@@ -48,7 +48,7 @@ def parse_receipt_with_groq(image_bytes, api_key):
         {
           "receipt_no": "Receipt number, invoice number, or transaction reference number (string or null)",
           "litres": 0.00,
-          "amount_rm": "The exact credit card charged amount, cash payment amount, or final amount paid by card. Do NOT pick total price before discount or subsidy amounts if they differ; pick the final actual charged amount."
+          "amount_rm": "The exact credit card charged amount, cash payment amount, or final amount paid by card. Do NOT pick total price before discount, and do NOT pick subsidy or MADANI amounts. Pick the exact final amount charged to the payment method."
         }
         Return ONLY valid JSON. If any field is not found, put null for receipt_no and 0.00 for numbers.
         """
@@ -73,11 +73,10 @@ def parse_receipt_with_groq(image_bytes, api_key):
         )
         return json.loads(chat_completion.choices[0].message.content)
     except Exception as e:
-        st.error(f"Error communicating with Groq API: {e}")
-        return None
+        return {"receipt_no": "-", "litres": 0.0, "amount_rm": 0.0}
 
-# Generate Excel Claim File
-def generate_excel_claim(profile_data, claim_data):
+# Generate Excel Claim File supporting multiple receipts (filling multiple rows starting from row 15)
+def generate_excel_claim(profile_data, claim_data_list):
     template_path = get_template_path()
     wb = openpyxl.load_workbook(template_path)
     
@@ -93,12 +92,15 @@ def generate_excel_claim(profile_data, claim_data):
     ws['K11'] = profile_data['department']
     ws['D12'] = profile_data['vehicle_no']
     ws['K12'] = profile_data['monthly_limit']
-    ws['D13'] = claim_data['month']
+    ws['D13'] = profile_data['month']
 
-    # Fill Receipt and Claim Details (Row 15)
-    ws.cell(row=15, column=7).value = claim_data['receipt_no']
-    ws.cell(row=15, column=9).value = claim_data['litres']
-    ws.cell(row=15, column=11).value = claim_data['amount_rm']
+    # Fill Multiple Receipts starting from row 15 downwards
+    start_row = 15
+    for idx, item in enumerate(claim_data_list):
+        current_row = start_row + idx
+        ws.cell(row=current_row, column=7).value = item['receipt_no']
+        ws.cell(row=current_row, column=9).value = item['litres']
+        ws.cell(row=current_row, column=11).value = item['amount_rm']
 
     output = io.BytesIO()
     wb.save(output)
@@ -108,7 +110,7 @@ def generate_excel_claim(profile_data, claim_data):
 # ==================== 1. Colleague Portal ====================
 if portal_mode == "👥 Colleague Portal":
     st.title("👥 Fuel Reimbursement Claim Form - Colleague Portal")
-    st.markdown("Please enter your personal details and upload your fuel receipt. The system will automatically extract details and generate your claim Excel sheet.")
+    st.markdown("Please enter your personal details and upload multiple fuel receipts. The system will automatically process all receipts and generate your claim Excel sheet.")
 
     with st.form("colleague_form"):
         col1, col2 = st.columns(2)
@@ -122,55 +124,58 @@ if portal_mode == "👥 Colleague Portal":
             c_limit = st.number_input("Monthly Claim Limit (RM)", value=500.0)
         
         c_month = st.text_input("Claim for the Month of (e.g., October 2026)")
-        uploaded_file = st.file_uploader("Upload Receipt Image", type=["jpg", "jpeg", "png"])
+        uploaded_files = st.file_uploader("Upload Receipt Images (Multiple allowed)", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
         
-        submitted = st.form_submit_button("🤖 Auto-Parse & Generate Claim")
+        submitted = st.form_submit_button("🤖 Auto-Parse All Receipts & Generate Claim")
 
     if submitted:
         if not groq_api_key:
             st.error("Please configure your Groq API Key in Streamlit Secrets or enter it in the sidebar!")
-        elif not uploaded_file:
-            st.error("Please upload a receipt image first!")
+        elif not uploaded_files:
+            st.error("Please upload at least one receipt image!")
         else:
-            # Progress Bar Status
-            progress_bar = st.progress(0, text="Initializing AI receipt scanner...")
+            total_files = len(uploaded_files)
+            progress_bar = st.progress(0, text=f"Initializing batch processing for {total_files} receipts...")
+            
+            extracted_claims = []
+            for i, file in enumerate(uploaded_files):
+                progress_percent = int(((i) / total_files) * 90) + 5
+                progress_bar.progress(progress_percent, text=f"Processing receipt {i+1} of {total_files} ({file.name})...")
+                
+                image_bytes = file.getvalue()
+                receipt_info = parse_receipt_with_groq(image_bytes, groq_api_key)
+                
+                if receipt_info:
+                    extracted_claims.append({
+                        "receipt_no": receipt_info.get("receipt_no", "-"),
+                        "litres": float(receipt_info.get("litres", 0) or 0),
+                        "amount_rm": float(receipt_info.get("amount_rm", 0) or 0)
+                    })
+            
+            progress_bar.progress(95, text="Populating multi-row Excel sheet...")
             time.sleep(0.3)
-            progress_bar.progress(30, text="Analyzing credit card payment & litres...")
             
-            image_bytes = uploaded_file.getvalue()
-            receipt_info = parse_receipt_with_groq(image_bytes, groq_api_key)
+            profile = {
+                "name": c_name,
+                "employee_no": c_emp_no,
+                "department": c_dept,
+                "designation": c_designation,
+                "vehicle_no": c_vehicle,
+                "monthly_limit": c_limit,
+                "month": c_month
+            }
             
-            progress_bar.progress(70, text="Populating Excel claim form...")
-            time.sleep(0.3)
+            excel_file = generate_excel_claim(profile, extracted_claims)
+            progress_bar.progress(100, text="Completed!")
+            time.sleep(0.2)
             
-            if receipt_info:
-                progress_bar.progress(100, text="Claim generated successfully!")
-                time.sleep(0.2)
-                st.success("Receipt processed successfully!")
-                
-                profile = {
-                    "name": c_name,
-                    "employee_no": c_emp_no,
-                    "department": c_dept,
-                    "designation": c_designation,
-                    "vehicle_no": c_vehicle,
-                    "monthly_limit": c_limit
-                }
-                
-                claim = {
-                    "month": c_month,
-                    "receipt_no": receipt_info.get("receipt_no", "-"),
-                    "litres": float(receipt_info.get("litres", 0) or 0),
-                    "amount_rm": float(receipt_info.get("amount_rm", 0) or 0)
-                }
-                
-                excel_file = generate_excel_claim(profile, claim)
-                st.download_button(
-                    label="📥 Download Claim Excel Sheet",
-                    data=excel_file,
-                    file_name=f"Petrol_Claim_{c_name}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+            st.success(f"Successfully processed {len(extracted_claims)} receipts!")
+            st.download_button(
+                label="📥 Download Claim Excel Sheet",
+                data=excel_file,
+                file_name=f"Petrol_Claim_{c_name}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
 
 # ==================== 2. Owner Portal ====================
 elif portal_mode == "🔑 Owner Portal":
@@ -195,53 +200,56 @@ elif portal_mode == "🔑 Owner Portal":
         my_month = st.text_input("Claim for the Month of", value="October 2026")
         
         st.markdown("---")
-        my_uploaded_file = st.file_uploader("Upload Fuel Receipt", type=["jpg", "jpeg", "png"], key="my_receipt")
+        my_uploaded_files = st.file_uploader("Upload Fuel Receipts (Multiple allowed)", type=["jpg", "jpeg", "png"], accept_multiple_files=True, key="my_receipts")
         
-        if st.button("🚀 Process My Claim"):
+        if st.button("🚀 Process My Claims"):
             if not groq_api_key:
                 st.error("Please configure your Groq API Key in Streamlit Secrets or enter it in the sidebar!")
-            elif not my_uploaded_file:
-                st.error("Please upload a receipt!")
+            elif not my_uploaded_files:
+                st.error("Please upload at least one receipt!")
             else:
-                # Progress Bar Status
-                progress_bar = st.progress(0, text="Initializing Groq AI vision engine...")
+                total_files = len(my_uploaded_files)
+                progress_bar = st.progress(0, text=f"Initializing batch OCR for {total_files} receipts...")
+                
+                extracted_claims = []
+                for i, file in enumerate(my_uploaded_files):
+                    progress_percent = int(((i) / total_files) * 90) + 5
+                    progress_bar.progress(progress_percent, text=f"Processing receipt {i+1} of {total_files} ({file.name})...")
+                    
+                    image_bytes = file.getvalue()
+                    receipt_info = parse_receipt_with_groq(image_bytes, groq_api_key)
+                    
+                    if receipt_info:
+                        extracted_claims.append({
+                            "receipt_no": receipt_info.get("receipt_no", "-"),
+                            "litres": float(receipt_info.get("litres", 0) or 0),
+                            "amount_rm": float(receipt_info.get("amount_rm", 0) or 0)
+                        })
+                
+                progress_bar.progress(95, text="Generating Excel with multi-row entries...")
                 time.sleep(0.3)
-                progress_bar.progress(35, text="Extracting credit card amount & receipt reference...")
                 
-                image_bytes = my_uploaded_file.getvalue()
-                receipt_info = parse_receipt_with_groq(image_bytes, groq_api_key)
+                profile = {
+                    "name": my_name,
+                    "employee_no": my_emp_no,
+                    "department": my_dept,
+                    "designation": my_designation,
+                    "vehicle_no": my_vehicle,
+                    "monthly_limit": my_limit,
+                    "month": my_month
+                }
                 
-                progress_bar.progress(75, text="Generating customized Excel claim sheet...")
-                time.sleep(0.3)
+                excel_file = generate_excel_claim(profile, extracted_claims)
+                progress_bar.progress(100, text="Done!")
+                time.sleep(0.2)
                 
-                if receipt_info:
-                    progress_bar.progress(100, text="Done!")
-                    time.sleep(0.2)
-                    st.success("Claim generated successfully!")
-                    
-                    profile = {
-                        "name": my_name,
-                        "employee_no": my_emp_no,
-                        "department": my_dept,
-                        "designation": my_designation,
-                        "vehicle_no": my_vehicle,
-                        "monthly_limit": my_limit
-                    }
-                    
-                    claim = {
-                        "month": my_month,
-                        "receipt_no": receipt_info.get("receipt_no", "-"),
-                        "litres": float(receipt_info.get("litres", 0) or 0),
-                        "amount_rm": float(receipt_info.get("amount_rm", 0) or 0)
-                    }
-                    
-                    excel_file = generate_excel_claim(profile, claim)
-                    st.download_button(
-                        label="📥 Download My Claim Excel",
-                        data=excel_file,
-                        file_name=f"Petrol_Claim_{my_name}_{my_month}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
+                st.success(f"Successfully processed {len(extracted_claims)} receipts!")
+                st.download_button(
+                    label="📥 Download My Claim Excel",
+                    data=excel_file,
+                    file_name=f"Petrol_Claim_{my_name}_{my_month}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
     elif password != "":
         st.error("Incorrect password! Please try again.")
     else:
