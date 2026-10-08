@@ -42,7 +42,7 @@ def get_last_month_str():
     last_month = first_day - datetime.timedelta(days=1)
     return last_month.strftime("%B %Y")
 
-# Parse single receipt using Groq Vision API (Robust JSON cleaning)
+# Parse receipt focusing purely on Receipt No and Litres (Amount is calculated precisely via 1.99 rate)
 def parse_receipt_with_groq(image_bytes, api_key):
     try:
         client = Groq(api_key=api_key)
@@ -50,13 +50,12 @@ def parse_receipt_with_groq(image_bytes, api_key):
         
         prompt = """
         You are an expert financial OCR assistant for petrol receipts in Malaysia.
-        Analyze this petrol receipt image and extract the following 3 core fields accurately in JSON format:
+        Analyze this petrol receipt image and extract ONLY the following 2 core fields accurately in JSON format:
         {
-          "receipt_no": "Receipt number, invoice number, or transaction reference number (string or null)",
-          "litres": 0.00,
-          "amount_rm": "The exact credit card charged amount, cash payment amount, or final amount paid by card. Do NOT pick total price before discount, and do NOT pick subsidy or MADANI amounts. Pick the exact final amount charged to the payment method."
+          "receipt_no": "The transaction reference number or receipt number usually located near the top (e.g., 8425439_20260830_IPFI295)",
+          "litres": 0.00
         }
-        Return ONLY valid JSON. If any field is not found, put null for receipt_no and 0.00 for numbers.
+        Return ONLY valid JSON. If any field is not found, put null for receipt_no and 0.00 for litres.
         """
         
         chat_completion = client.chat.completions.create(
@@ -89,10 +88,10 @@ def parse_receipt_with_groq(image_bytes, api_key):
         
         return json.loads(content)
     except Exception as e:
-        return {"receipt_no": "-", "litres": 0.0, "amount_rm": 0.0}
+        return {"receipt_no": "-", "litres": 0.0}
 
-# Generate Excel Claim File while strictly preserving header formatting and merged cells
-def generate_excel_claim(profile_data, claim_data_list):
+# Generate Excel Claim File with duplicate check and strict Litres x 1.99 calculation
+def generate_excel_claim(profile_data, raw_claim_list):
     template_path = get_template_path()
     wb = openpyxl.load_workbook(template_path)
     
@@ -110,31 +109,53 @@ def generate_excel_claim(profile_data, claim_data_list):
     ws['K12'] = profile_data['monthly_limit']
     ws['D13'] = profile_data['month']
 
+    # Anti-Duplicate & Filtering logic (preventing duplicate receipt numbers)
+    seen_receipts = set()
+    unique_claims = []
+    
+    for item in raw_claim_list:
+        r_no = item.get('receipt_no', '-')
+        if r_no and r_no != '-' and r_no != 'Error':
+            if r_no in seen_receipts:
+                continue # Skip duplicate receipt
+            seen_receipts.add(r_no)
+        
+        litres = float(item.get('litres', 0) or 0)
+        # Strict calculation: Claim Amount = Litres * 1.99 (rounded to 2 decimal places)
+        amount_rm = round(litres * 1.99, 2)
+        
+        unique_claims.append({
+            "Filename": item.get("Filename", "Receipt"),
+            "receipt_no": r_no,
+            "litres": litres,
+            "amount_rm": amount_rm
+        })
+
     # Fill multiple receipts starting from row 15 downwards
     start_row = 15
-    for idx, item in enumerate(claim_data_list):
+    for idx, item in enumerate(unique_claims):
         current_row = start_row + idx
         
-        # Receipt No (Merged G:H -> column 7)
+        # Receipt No (Column 7)
         ws.cell(row=current_row, column=7).value = item['receipt_no']
         
-        # Litres (Merged I:J -> column 9)
+        # Litres (Column 9)
         ws.cell(row=current_row, column=9).value = item['litres']
         
-        # Claim Amount (Merged K:O -> column 11)
+        # Claim Amount calculated precisely at 1.99 per litre (Column 11)
         ws.cell(row=current_row, column=11).value = item['amount_rm']
 
     output = io.BytesIO()
     wb.save(output)
     output.seek(0)
-    return output
+    return output, unique_claims
 
 last_month_value = get_last_month_str()
 
 # ==================== 1. Colleague Portal ====================
 if portal_mode == "👥 Colleague Portal":
     st.title("👥 Fuel Reimbursement Claim Form - Colleague Portal")
-    st.markdown("Please enter your personal details and **upload up to 20 receipt images**. The system will process them at high speed and preview the extracted data below.")
+    st.markdown("Please enter your personal details and **upload up to 20 receipt images**. Automatic duplicate prevention and RM1.99/litre calculation applied.")
 
     with st.form("colleague_form"):
         col1, col2 = st.columns(2)
@@ -150,7 +171,7 @@ if portal_mode == "👥 Colleague Portal":
         c_month = st.text_input("Claim for the Month of", value=last_month_value, key="colleague_month_input")
         uploaded_files = st.file_uploader("Upload Receipt Images (Multiple allowed, up to 20)", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
         
-        submitted = st.form_submit_button("🤖 High-Speed Batch Process & Generate Claim")
+        submitted = st.form_submit_button("🤖 Batch Process & Generate Claim")
 
     if submitted:
         if not groq_api_key:
@@ -159,9 +180,9 @@ if portal_mode == "👥 Colleague Portal":
             st.error("Please upload at least one receipt image!")
         else:
             total_files = len(uploaded_files)
-            extracted_claims = []
+            raw_claims = []
             
-            with st.status(f"Processing {total_files} receipts at high speed...", expanded=True) as status:
+            with st.status(f"Processing {total_files} receipts securely...", expanded=True) as status:
                 for i, file in enumerate(uploaded_files):
                     status.update(label=f"Processing receipt {i+1} of {total_files} ({file.name})...")
                     
@@ -169,18 +190,13 @@ if portal_mode == "👥 Colleague Portal":
                     receipt_info = parse_receipt_with_groq(image_bytes, groq_api_key)
                     
                     if receipt_info:
-                        extracted_claims.append({
+                        raw_claims.append({
                             "Filename": file.name,
                             "receipt_no": receipt_info.get("receipt_no", "-"),
-                            "litres": float(receipt_info.get("litres", 0) or 0),
-                            "amount_rm": float(receipt_info.get("amount_rm", 0) or 0)
+                            "litres": receipt_info.get("litres", 0)
                         })
-                    # Removed time.sleep to enable maximum speed
                 
-                status.update(label=f"Successfully processed all {total_files} receipts!", state="complete", expanded=False)
-            
-            st.markdown("### 📊 Batch Extraction Preview")
-            st.dataframe(pd.DataFrame(extracted_claims), use_container_width=True)
+                status.update(label="Applying duplicate checks and RM1.99 calculation...", state="complete", expanded=False)
             
             profile = {
                 "name": c_name,
@@ -192,9 +208,12 @@ if portal_mode == "👥 Colleague Portal":
                 "month": c_month
             }
             
-            excel_file = generate_excel_claim(profile, extracted_claims)
+            excel_file, processed_claims = generate_excel_claim(profile, raw_claims)
             
-            st.success(f"Successfully populated {len(extracted_claims)} receipts into the Excel claim form!")
+            st.markdown("### 📊 Batch Extraction Preview (Anti-Duplicate & Auto-Calculated)")
+            st.dataframe(pd.DataFrame(processed_claims), use_container_width=True)
+            
+            st.success(f"Successfully processed {len(processed_claims)} unique receipts (Duplicates removed if any).")
             st.download_button(
                 label="📥 Download Claim Excel Sheet",
                 data=excel_file,
@@ -227,16 +246,16 @@ elif portal_mode == "🔑 Owner Portal":
         st.markdown("---")
         my_uploaded_files = st.file_uploader("Upload Fuel Receipts (Multiple allowed, up to 20)", type=["jpg", "jpeg", "png"], accept_multiple_files=True, key="my_receipts")
         
-        if st.button("🚀 High-Speed Batch Process My Receipts"):
+        if st.button("🚀 Batch Process My Receipts"):
             if not groq_api_key:
                 st.error("Please configure your Groq API Key!")
             elif not my_uploaded_files:
                 st.error("Please upload at least one receipt!")
             else:
                 total_files = len(my_uploaded_files)
-                extracted_claims = []
+                raw_claims = []
                 
-                with st.status(f"Processing {total_files} receipts at high speed...", expanded=True) as status:
+                with st.status(f"Processing {total_files} receipts securely...", expanded=True) as status:
                     for i, file in enumerate(my_uploaded_files):
                         status.update(label=f"Processing receipt {i+1} of {total_files} ({file.name})...")
                         
@@ -244,18 +263,13 @@ elif portal_mode == "🔑 Owner Portal":
                         receipt_info = parse_receipt_with_groq(image_bytes, groq_api_key)
                         
                         if receipt_info:
-                            extracted_claims.append({
+                            raw_claims.append({
                                 "Filename": file.name,
                                 "receipt_no": receipt_info.get("receipt_no", "-"),
-                                "litres": float(receipt_info.get("litres", 0) or 0),
-                                "amount_rm": float(receipt_info.get("amount_rm", 0) or 0)
+                                "litres": receipt_info.get("litres", 0)
                             })
-                        # Removed time.sleep for maximum speed
                     
-                    status.update(label=f"Successfully processed all {total_files} receipts!", state="complete", expanded=False)
-                
-                st.markdown("### 📊 Batch Extraction Preview")
-                st.dataframe(pd.DataFrame(extracted_claims), use_container_width=True)
+                    status.update(label="Applying duplicate checks and RM1.99 calculation...", state="complete", expanded=False)
                 
                 profile = {
                     "name": my_name,
@@ -267,9 +281,12 @@ elif portal_mode == "🔑 Owner Portal":
                     "month": my_month
                 }
                 
-                excel_file = generate_excel_claim(profile, extracted_claims)
+                excel_file, processed_claims = generate_excel_claim(profile, raw_claims)
                 
-                st.success(f"Successfully populated {len(extracted_claims)} receipts into your Excel form!")
+                st.markdown("### 📊 Batch Extraction Preview (Anti-Duplicate & Auto-Calculated)")
+                st.dataframe(pd.DataFrame(processed_claims), use_container_width=True)
+                
+                st.success(f"Successfully processed {len(processed_claims)} unique receipts (Duplicates removed if any).")
                 st.download_button(
                     label="📥 Download My Claim Excel",
                     data=excel_file,
@@ -279,4 +296,4 @@ elif portal_mode == "🔑 Owner Portal":
     elif password != "":
         st.error("Incorrect password! Please try again.")
     else:
-        st.info("Please enter the password to access your secure portal.")
+        st.info("请输入密码以进入你的专属后台。")
