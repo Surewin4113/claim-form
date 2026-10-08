@@ -36,14 +36,11 @@ def get_template_path():
         return xlsx_files[0]
     return "Fuel Reimbursement Claim Form new- Original - Copy.xlsx.xlsx"
 
-# Automatically calculate last month (e.g., September 2026 if current is October 2026)
-def get_last_month_str():
-    today = datetime.date.today()
-    first_day = today.replace(day=1)
-    last_month = first_day - datetime.timedelta(days=1)
-    return last_month.strftime("%B %Y")
+# Get current month (e.g., October 2026)
+def get_current_month_str():
+    return datetime.date.today().strftime("%B %Y")
 
-# Parse single receipt using Groq Vision API (Robust JSON cleaning to prevent errors)
+# Parse single receipt using Groq Vision API (Robust JSON cleaning)
 def parse_receipt_with_groq(image_bytes, api_key):
     try:
         client = Groq(api_key=api_key)
@@ -80,7 +77,6 @@ def parse_receipt_with_groq(image_bytes, api_key):
         )
         
         content = chat_completion.choices[0].message.content.strip()
-        # Clean markdown code blocks if present
         if content.startswith("```json"):
             content = content[7:]
         if content.startswith("```"):
@@ -93,7 +89,7 @@ def parse_receipt_with_groq(image_bytes, api_key):
     except Exception as e:
         return {"receipt_no": "-", "litres": 0.0, "amount_rm": 0.0}
 
-# Generate Excel Claim File supporting multiple rows starting from row 15
+# Generate Excel Claim File while strictly preserving header formatting and merged cells
 def generate_excel_claim(profile_data, claim_data_list):
     template_path = get_template_path()
     wb = openpyxl.load_workbook(template_path)
@@ -116,8 +112,14 @@ def generate_excel_claim(profile_data, claim_data_list):
     start_row = 15
     for idx, item in enumerate(claim_data_list):
         current_row = start_row + idx
+        
+        # Receipt No (Merged G:H -> column 7)
         ws.cell(row=current_row, column=7).value = item['receipt_no']
+        
+        # Litres (Merged I:J -> column 9)
         ws.cell(row=current_row, column=9).value = item['litres']
+        
+        # Claim Amount (Merged K:O -> column 11)
         ws.cell(row=current_row, column=11).value = item['amount_rm']
 
     output = io.BytesIO()
@@ -125,7 +127,7 @@ def generate_excel_claim(profile_data, claim_data_list):
     output.seek(0)
     return output
 
-default_month_value = get_last_month_str()
+current_month_value = get_current_month_str()
 
 # ==================== 1. Colleague Portal ====================
 if portal_mode == "👥 Colleague Portal":
@@ -143,7 +145,8 @@ if portal_mode == "👥 Colleague Portal":
             c_vehicle = st.text_input("Vehicle No.")
             c_limit = st.number_input("Monthly Claim Limit (RM)", value=500.0)
         
-        c_month = st.text_input("Claim for the Month of", value=default_month_value)
+        # Added unique key to prevent Streamlit session state caching issues
+        c_month = st.text_input("Claim for the Month of", value=current_month_value, key="colleague_month_input")
         uploaded_files = st.file_uploader("Upload Receipt Images (Multiple allowed, up to 20)", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
         
         submitted = st.form_submit_button("🤖 Batch Process & Generate Claim")
@@ -219,7 +222,8 @@ elif portal_mode == "🔑 Owner Portal":
             my_vehicle = st.text_input("Vehicle No.", value="VKG4113")
             my_limit = st.number_input("Monthly Claim Limit (RM)", value=800.0)
             
-        my_month = st.text_input("Claim for the Month of", value=default_month_value)
+        # Added unique key to prevent Streamlit session state caching issues
+        my_month = st.text_input("Claim for the Month of", value=current_month_value, key="owner_month_input")
         
         st.markdown("---")
         my_uploaded_files = st.file_uploader("Upload Fuel Receipts (Multiple allowed, up to 20)", type=["jpg", "jpeg", "png"], accept_multiple_files=True, key="my_receipts")
