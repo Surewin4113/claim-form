@@ -181,4 +181,51 @@ elif portal_mode == "🔑 Owner Portal":
         with col2:
             my_designation = st.text_input("Designation", value="IS&T SM")
             my_vehicle = st.text_input("Vehicle No.", value="VKG4113")
-            my_limit = st.number_
+            my_limit = st.number_input("Monthly Claim Limit (RM)", value=800.0)
+            
+        my_month = st.text_input("Claim for the Month of", value="October 2026")
+        
+        st.markdown("---")
+        my_uploaded_file = st.file_uploader("Upload Fuel Receipt", type=["jpg", "jpeg", "png"], key="my_receipt")
+        
+        if st.button("🚀 Process My Claim"):
+            if not groq_api_key:
+                st.error("Please configure your Groq API Key in Streamlit Secrets or enter it in the sidebar!")
+            elif not my_uploaded_file:
+                st.error("Please upload a receipt!")
+            else:
+                with st.spinner("Groq AI is analyzing your receipt..."):
+                    image_bytes = my_uploaded_file.getvalue()
+                    receipt_info = parse_receipt_with_groq(image_bytes, groq_api_key)
+                    
+                    if receipt_info:
+                        st.success("Extraction Result:")
+                        st.json(receipt_info)
+                        
+                        profile = {
+                            "name": my_name,
+                            "employee_no": my_emp_no,
+                            "department": my_dept,
+                            "designation": my_designation,
+                            "vehicle_no": my_vehicle,
+                            "monthly_limit": my_limit
+                        }
+                        
+                        claim = {
+                            "month": my_month,
+                            "receipt_no": receipt_info.get("receipt_no", "-"),
+                            "litres": float(receipt_info.get("litres", 0) or 0),
+                            "amount_rm": float(receipt_info.get("amount_rm", 0) or 0)
+                        }
+                        
+                        excel_file = generate_excel_claim(profile, claim)
+                        st.download_button(
+                            label="📥 Download My Claim Excel",
+                            data=excel_file,
+                            file_name=f"Petrol_Claim_{my_name}_{my_month}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
+    elif password != "":
+        st.error("Incorrect password! Please try again.")
+    else:
+        st.info("Please enter the password to access your secure portal.")
