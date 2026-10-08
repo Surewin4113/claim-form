@@ -36,89 +36,75 @@ def get_template_path():
         return xlsx_files[0]
     return "Fuel Reimbursement Claim Form new- Original - Copy.xlsx.xlsx"
 
-# Automatically calculate last month (default to last month every time)
+# Automatically calculate last month
 def get_last_month_str():
     today = datetime.date.today()
     first_day = today.replace(day=1)
     last_month = first_day - datetime.timedelta(days=1)
     return last_month.strftime("%B %Y")
 
-# Parse receipt with robust auto-retry if litres is 0 or missing
+# Parse receipt with detailed error tracking
 def parse_receipt_with_groq(image_bytes, api_key):
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            client = Groq(api_key=api_key)
-            encoded_image = base64.b64encode(image_bytes).decode('utf-8')
-            
-            prompt = """
-            You are an expert financial OCR assistant for petrol receipts in Malaysia.
-            Analyze this petrol receipt image and extract the following 3 fields accurately in JSON format:
-            {
-              "date": "The transaction date on the receipt in DD/MM/YYYY or YYYY-MM-DD format (string or null)",
-              "receipt_no": "The transaction reference number or receipt number usually located near the top (e.g., 8425439_20260830_IPFI295)",
-              "litres": 0.00
-            }
-            Return ONLY valid JSON. Ensure litres is extracted as a number greater than 0.
-            """
-            
-            chat_completion = client.chat.completions.create(
-                model="llama-3.2-11b-vision-preview",
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{encoded_image}"
-                                }
+    try:
+        client = Groq(api_key=api_key)
+        encoded_image = base64.b64encode(image_bytes).decode('utf-8')
+        
+        prompt = """
+        You are an expert financial OCR assistant for petrol receipts in Malaysia.
+        Analyze this petrol receipt image and extract the following 3 fields accurately in JSON format:
+        {
+          "date": "The transaction date on the receipt in DD/MM/YYYY or YYYY-MM-DD format (string or null)",
+          "receipt_no": "The transaction reference number or receipt number usually located near the top (e.g., 8425439_20260830_IPFI295)",
+          "litres": 0.00
+        }
+        Return ONLY valid JSON. Ensure litres is extracted as a number greater than 0.
+        """
+        
+        chat_completion = client.chat.completions.create(
+            model="llama-3.2-11b-vision-preview",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{encoded_image}"
                             }
-                        ]
-                    }
-                ],
-                response_format={"type": "json_object"}
-            )
+                        }
+                    ]
+                }
+            ],
+            response_format={"type": "json_object"}
+        )
+        
+        content = chat_completion.choices[0].message.content.strip()
+        if content.startswith("```json"):
+            content = content[7:]
+        if content.startswith("```"):
+            content = content[3:]
+        if content.endswith("```"):
+            content = content[:-3]
+        content = content.strip()
+        
+        data = json.loads(content)
+        r_no = str(data.get("receipt_no", "")).strip()
+        date_val = str(data.get("date", "")).strip()
+        
+        try:
+            litres = float(data.get("litres", 0) or 0)
+        except:
+            litres = 0.0
             
-            content = chat_completion.choices[0].message.content.strip()
-            if content.startswith("```json"):
-                content = content[7:]
-            if content.startswith("```"):
-                content = content[3:]
-            if content.endswith("```"):
-                content = content[:-3]
-            content = content.strip()
-            
-            data = json.loads(content)
-            r_no = str(data.get("receipt_no", "")).strip()
-            date_val = str(data.get("date", "")).strip()
-            try:
-                litres = float(data.get("litres", 0) or 0)
-            except:
-                litres = 0.0
-            
-            # If litres is successfully read (> 0), return valid data
-            if litres > 0:
-                if not r_no or r_no in ["-", "null", "None", ""]:
-                    data["receipt_no"] = "-"
-                if not date_val or date_val in ["-", "null", "None", ""]:
-                    data["date"] = "-"
-                return data
-            else:
-                # If litres is 0, retry
-                if attempt < max_retries - 1:
-                    time.sleep(1)
-                    continue
-                else:
-                    return {"date": date_val if date_val else "-", "receipt_no": r_no if r_no else "-", "litres": litres}
-        except Exception as e:
-            if attempt < max_retries - 1:
-                time.sleep(1)
-                continue
-            else:
-                return {"date": "-", "receipt_no": "-", "litres": 0.0}
-    return {"date": "-", "receipt_no": "-", "litres": 0.0}
+        return {
+            "date": date_val if date_val and date_val not in ["null", "None", ""] else "-",
+            "receipt_no": r_no if r_no and r_no not in ["null", "None", ""] else "-",
+            "litres": litres
+        }
+    except Exception as e:
+        # Returns the actual error message so you can see why it failed in the preview table
+        return {"date": "Error", "receipt_no": f"API Error: {str(e)[:40]}", "litres": 0.0}
 
 # Generate Excel Claim File with smart deduplication and RM1.99 calculation
 def generate_excel_claim(profile_data, raw_claim_list):
@@ -139,7 +125,6 @@ def generate_excel_claim(profile_data, raw_claim_list):
     ws['K12'] = profile_data['monthly_limit']
     ws['D13'] = profile_data['month']
 
-    # Smart Deduplication based on Date + Litres + Receipt No
     seen_transactions = set()
     unique_claims = []
     
@@ -156,7 +141,7 @@ def generate_excel_claim(profile_data, raw_claim_list):
             
         signature = f"{r_no}_{date_str}_{litres}"
         
-        if r_no != '-' and r_no != 'Error':
+        if r_no != '-' and not r_no.startswith("API Error"):
             if signature in seen_transactions:
                 continue
             seen_transactions.add(signature)
@@ -171,11 +156,9 @@ def generate_excel_claim(profile_data, raw_claim_list):
             "amount_rm": amount_rm
         })
 
-    # Fill multiple receipts starting from row 15 downwards
     start_row = 15
     for idx, item in enumerate(unique_claims):
         current_row = start_row + idx
-        
         ws.cell(row=current_row, column=7).value = item['receipt_no']
         ws.cell(row=current_row, column=9).value = item['litres']
         ws.cell(row=current_row, column=11).value = item['amount_rm']
@@ -190,7 +173,7 @@ last_month_value = get_last_month_str()
 # ==================== 1. Colleague Portal ====================
 if portal_mode == "👥 Colleague Portal":
     st.title("👥 Fuel Reimbursement Claim Form - Colleague Portal")
-    st.markdown("Please enter your personal details and **upload up to 20 receipt images**. Automatic retry ensures no zero values.")
+    st.markdown("Please enter your personal details and **upload up to 20 receipt images**.")
 
     with st.form("colleague_form"):
         col1, col2 = st.columns(2)
@@ -217,7 +200,7 @@ if portal_mode == "👥 Colleague Portal":
             total_files = len(uploaded_files)
             raw_claims = []
             
-            with st.status(f"Processing {total_files} receipts securely (with auto-retry)...", expanded=True) as status:
+            with st.status(f"Processing {total_files} receipts...", expanded=True) as status:
                 for i, file in enumerate(uploaded_files):
                     status.update(label=f"Processing receipt {i+1} of {total_files} ({file.name})...")
                     
@@ -231,6 +214,7 @@ if portal_mode == "👥 Colleague Portal":
                             "receipt_no": receipt_info.get("receipt_no", "-"),
                             "litres": receipt_info.get("litres", 0)
                         })
+                    time.sleep(0.5) # Slight pause to prevent rate limiting
                 
                 status.update(label="Done!", state="complete", expanded=False)
             
@@ -247,7 +231,7 @@ if portal_mode == "👥 Colleague Portal":
 
     if "raw_claims" in st.session_state and st.session_state.raw_claims:
         st.markdown("### 📊 Batch Extraction Preview & Editor")
-        st.info("💡 **Tip**: Review the extracted data. If needed, you can click and edit any cell directly before downloading.")
+        st.info("💡 **Tip**: If any row shows an API error or missing data, you can directly click and type the correct values in the table below.")
         
         _, initial_processed = generate_excel_claim(st.session_state.profile, st.session_state.raw_claims)
         
@@ -302,7 +286,7 @@ elif portal_mode == "🔑 Owner Portal":
                 total_files = len(my_uploaded_files)
                 raw_claims = []
                 
-                with st.status(f"Processing {total_files} receipts securely (with auto-retry)...", expanded=True) as status:
+                with st.status(f"Processing {total_files} receipts...", expanded=True) as status:
                     for i, file in enumerate(my_uploaded_files):
                         status.update(label=f"Processing receipt {i+1} of {total_files} ({file.name})...")
                         
@@ -316,6 +300,7 @@ elif portal_mode == "🔑 Owner Portal":
                                 "receipt_no": receipt_info.get("receipt_no", "-"),
                                 "litres": receipt_info.get("litres", 0)
                             })
+                        time.sleep(0.5)
                     
                     status.update(label="Done!", state="complete", expanded=False)
                 
@@ -332,7 +317,7 @@ elif portal_mode == "🔑 Owner Portal":
 
         if "my_raw_claims" in st.session_state and st.session_state.my_raw_claims:
             st.markdown("### 📊 Batch Extraction Preview & Editor")
-            st.info("💡 **Tip**: Review the extracted data. If needed, you can click and edit any cell directly before downloading.")
+            st.info("💡 **Tip**: If any row shows an API error or missing data, you can directly click and type the correct values in the table below.")
             
             _, initial_processed_my = generate_excel_claim(st.session_state.my_profile, st.session_state.my_raw_claims)
             
