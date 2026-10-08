@@ -42,7 +42,7 @@ def get_last_month_str():
     last_month = first_day - datetime.timedelta(days=1)
     return last_month.strftime("%B %Y")
 
-# Parse receipt focusing purely on Receipt No and Litres (Amount is calculated precisely via 1.99 rate)
+# Parse receipt focusing on Date, Receipt No, and Litres
 def parse_receipt_with_groq(image_bytes, api_key):
     try:
         client = Groq(api_key=api_key)
@@ -50,12 +50,13 @@ def parse_receipt_with_groq(image_bytes, api_key):
         
         prompt = """
         You are an expert financial OCR assistant for petrol receipts in Malaysia.
-        Analyze this petrol receipt image and extract ONLY the following 2 core fields accurately in JSON format:
+        Analyze this petrol receipt image and extract the following 3 fields accurately in JSON format:
         {
+          "date": "The transaction date on the receipt in DD/MM/YYYY or YYYY-MM-DD format (string or null)",
           "receipt_no": "The transaction reference number or receipt number usually located near the top (e.g., 8425439_20260830_IPFI295)",
           "litres": 0.00
         }
-        Return ONLY valid JSON. If any field is not found, put null for receipt_no and 0.00 for litres.
+        Return ONLY valid JSON. If any field is not found, put null for date and receipt_no, and 0.00 for litres.
         """
         
         chat_completion = client.chat.completions.create(
@@ -88,9 +89,9 @@ def parse_receipt_with_groq(image_bytes, api_key):
         
         return json.loads(content)
     except Exception as e:
-        return {"receipt_no": "-", "litres": 0.0}
+        return {"date": "-", "receipt_no": "-", "litres": 0.0}
 
-# Generate Excel Claim File with duplicate check and strict Litres x 1.99 calculation
+# Generate Excel Claim File with smart deduplication and RM1.99 calculation
 def generate_excel_claim(profile_data, raw_claim_list):
     template_path = get_template_path()
     wb = openpyxl.load_workbook(template_path)
@@ -109,23 +110,36 @@ def generate_excel_claim(profile_data, raw_claim_list):
     ws['K12'] = profile_data['monthly_limit']
     ws['D13'] = profile_data['month']
 
-    # Anti-Duplicate & Filtering logic (preventing duplicate receipt numbers)
-    seen_receipts = set()
+    # Smart Deduplication: Only consider exact duplicate if Date AND Litres AND Receipt No are all identical.
+    # Different date or different litres means they are separate valid transactions even if receipt_no had an issue.
+    seen_transactions = set()
     unique_claims = []
     
     for item in raw_claim_list:
-        r_no = item.get('receipt_no', '-')
-        if r_no and r_no != '-' and r_no != 'Error':
-            if r_no in seen_receipts:
-                continue # Skip duplicate receipt
-            seen_receipts.add(r_no)
+        date_str = str(item.get('date', '-')).strip()
+        r_no = str(item.get('receipt_no', '-')).strip()
+        if not r_no or r_no == '' or r_no == 'nan':
+            r_no = '-'
+            
+        try:
+            litres = float(item.get('litres', 0) or 0)
+        except:
+            litres = 0.0
+            
+        # Unique signature: receipt_no + date + litres
+        signature = f"{r_no}_{date_str}_{litres}"
         
-        litres = float(item.get('litres', 0) or 0)
-        # Strict calculation: Claim Amount = Litres * 1.99 (rounded to 2 decimal places)
+        # If receipt_no is '-', we don't treat it as duplicate unless date and litres are also 100% identical to an existing one
+        if r_no != '-' and r_no != 'Error':
+            if signature in seen_transactions:
+                continue
+            seen_transactions.add(signature)
+        
         amount_rm = round(litres * 1.99, 2)
         
         unique_claims.append({
             "Filename": item.get("Filename", "Receipt"),
+            "date": date_str,
             "receipt_no": r_no,
             "litres": litres,
             "amount_rm": amount_rm
@@ -136,13 +150,8 @@ def generate_excel_claim(profile_data, raw_claim_list):
     for idx, item in enumerate(unique_claims):
         current_row = start_row + idx
         
-        # Receipt No (Column 7)
         ws.cell(row=current_row, column=7).value = item['receipt_no']
-        
-        # Litres (Column 9)
         ws.cell(row=current_row, column=9).value = item['litres']
-        
-        # Claim Amount calculated precisely at 1.99 per litre (Column 11)
         ws.cell(row=current_row, column=11).value = item['amount_rm']
 
     output = io.BytesIO()
@@ -155,7 +164,7 @@ last_month_value = get_last_month_str()
 # ==================== 1. Colleague Portal ====================
 if portal_mode == "👥 Colleague Portal":
     st.title("👥 Fuel Reimbursement Claim Form - Colleague Portal")
-    st.markdown("Please enter your personal details and **upload up to 20 receipt images**. Automatic duplicate prevention and RM1.99/litre calculation applied.")
+    st.markdown("Please enter your personal details and **upload up to 20 receipt images**. Different dates or litres are treated as unique transactions. You can edit any missing reference numbers in the preview table.")
 
     with st.form("colleague_form"):
         col1, col2 = st.columns(2)
@@ -192,13 +201,15 @@ if portal_mode == "👥 Colleague Portal":
                     if receipt_info:
                         raw_claims.append({
                             "Filename": file.name,
+                            "date": receipt_info.get("date", "-"),
                             "receipt_no": receipt_info.get("receipt_no", "-"),
                             "litres": receipt_info.get("litres", 0)
                         })
                 
-                status.update(label="Applying duplicate checks and RM1.99 calculation...", state="complete", expanded=False)
+                status.update(label="Done!", state="complete", expanded=False)
             
-            profile = {
+            st.session_state.raw_claims = raw_claims
+            st.session_state.profile = {
                 "name": c_name,
                 "employee_no": c_emp_no,
                 "department": c_dept,
@@ -207,19 +218,29 @@ if portal_mode == "👥 Colleague Portal":
                 "monthly_limit": c_limit,
                 "month": c_month
             }
-            
-            excel_file, processed_claims = generate_excel_claim(profile, raw_claims)
-            
-            st.markdown("### 📊 Batch Extraction Preview (Anti-Duplicate & Auto-Calculated)")
-            st.dataframe(pd.DataFrame(processed_claims), use_container_width=True)
-            
-            st.success(f"Successfully processed {len(processed_claims)} unique receipts (Duplicates removed if any).")
-            st.download_button(
-                label="📥 Download Claim Excel Sheet",
-                data=excel_file,
-                file_name=f"Petrol_Claim_{c_name}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+
+    if "raw_claims" in st.session_state and st.session_state.raw_claims:
+        st.markdown("### 📊 Batch Extraction Preview & Editor")
+        st.info("💡 **Tip**: Check the extracted **Date**, **Receipt No**, and **Litres**. If any receipt number was read as `-`, you can **directly click and type** the correct number in the table below!")
+        
+        _, initial_processed = generate_excel_claim(st.session_state.profile, st.session_state.raw_claims)
+        
+        edited_df = st.data_editor(
+            pd.DataFrame(initial_processed),
+            num_rows="dynamic",
+            use_container_width=True,
+            key="colleague_editor"
+        )
+        
+        final_claims = edited_df.to_dict('records')
+        excel_file, _ = generate_excel_claim(st.session_state.profile, final_claims)
+        
+        st.download_button(
+            label="📥 Download Final Verified Claim Excel Sheet",
+            data=excel_file,
+            file_name=f"Petrol_Claim_{st.session_state.profile['name']}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 
 # ==================== 2. Owner Portal ====================
 elif portal_mode == "🔑 Owner Portal":
@@ -265,35 +286,6 @@ elif portal_mode == "🔑 Owner Portal":
                         if receipt_info:
                             raw_claims.append({
                                 "Filename": file.name,
+                                "date": receipt_info.get("date", "-"),
                                 "receipt_no": receipt_info.get("receipt_no", "-"),
                                 "litres": receipt_info.get("litres", 0)
-                            })
-                    
-                    status.update(label="Applying duplicate checks and RM1.99 calculation...", state="complete", expanded=False)
-                
-                profile = {
-                    "name": my_name,
-                    "employee_no": my_emp_no,
-                    "department": my_dept,
-                    "designation": my_designation,
-                    "vehicle_no": my_vehicle,
-                    "monthly_limit": my_limit,
-                    "month": my_month
-                }
-                
-                excel_file, processed_claims = generate_excel_claim(profile, raw_claims)
-                
-                st.markdown("### 📊 Batch Extraction Preview (Anti-Duplicate & Auto-Calculated)")
-                st.dataframe(pd.DataFrame(processed_claims), use_container_width=True)
-                
-                st.success(f"Successfully processed {len(processed_claims)} unique receipts (Duplicates removed if any).")
-                st.download_button(
-                    label="📥 Download My Claim Excel",
-                    data=excel_file,
-                    file_name=f"Petrol_Claim_{my_name}_{my_month}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-    elif password != "":
-        st.error("Incorrect password! Please try again.")
-    else:
-        st.info("请输入密码以进入你的专属后台。")
