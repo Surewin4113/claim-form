@@ -35,7 +35,7 @@ def get_template_path():
         return xlsx_files[0]
     return "Fuel Reimbursement Claim Form new- Original - Copy.xlsx.xlsx"
 
-# Parse receipt using Groq Vision API (Using 11b-vision-preview for broad compatibility)
+# Parse receipt using Groq Vision API (Updated to current official qwen/qwen3.8-27b model)
 def parse_receipt_with_groq(image_bytes, api_key):
     try:
         client = Groq(api_key=api_key)
@@ -53,7 +53,7 @@ def parse_receipt_with_groq(image_bytes, api_key):
         """
         
         chat_completion = client.chat.completions.create(
-            model="llama-3.2-11b-vision-preview", # Fully supported multi-modal vision model on Groq
+            model="qwen/qwen3.8-27b", # Updated to Groq's active supported vision model
             messages=[
                 {
                     "role": "user",
