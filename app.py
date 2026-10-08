@@ -289,3 +289,45 @@ elif portal_mode == "🔑 Owner Portal":
                                 "date": receipt_info.get("date", "-"),
                                 "receipt_no": receipt_info.get("receipt_no", "-"),
                                 "litres": receipt_info.get("litres", 0)
+                            })
+                    
+                    status.update(label="Done!", state="complete", expanded=False)
+                
+                st.session_state.my_raw_claims = raw_claims
+                st.session_state.my_profile = {
+                    "name": my_name,
+                    "employee_no": my_emp_no,
+                    "department": my_dept,
+                    "designation": my_designation,
+                    "vehicle_no": my_vehicle,
+                    "monthly_limit": my_limit,
+                    "month": my_month
+                }
+
+        if "my_raw_claims" in st.session_state and st.session_state.my_raw_claims:
+            st.markdown("### 📊 Batch Extraction Preview & Editor")
+            st.info("💡 **Tip**: Check the extracted **Date**, **Receipt No**, and **Litres**. If any receipt number was read as `-`, you can **directly click and type** the correct number in the table below!")
+            
+            _, initial_processed_my = generate_excel_claim(st.session_state.my_profile, st.session_state.my_raw_claims)
+            
+            edited_df_my = st.data_editor(
+                pd.DataFrame(initial_processed_my),
+                num_rows="dynamic",
+                use_container_width=True,
+                key="owner_editor"
+            )
+            
+            final_claims_my = edited_df_my.to_dict('records')
+            excel_file_my, _ = generate_excel_claim(st.session_state.my_profile, final_claims_my)
+            
+            st.download_button(
+                label="📥 Download My Verified Claim Excel",
+                data=excel_file_my,
+                file_name=f"Petrol_Claim_{st.session_state.my_profile['name']}_{st.session_state.my_profile['month']}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+            
+    elif password != "":
+        st.error("Incorrect password! Please try again.")
+    else:
+        st.info("请输入密码以进入你的专属后台。")
