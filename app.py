@@ -6,7 +6,6 @@ import io
 import json
 import base64
 import glob
-import time
 import datetime
 
 # Page Configuration
@@ -36,9 +35,12 @@ def get_template_path():
         return xlsx_files[0]
     return "Fuel Reimbursement Claim Form new- Original - Copy.xlsx.xlsx"
 
-# Get current month (e.g., October 2026)
-def get_current_month_str():
-    return datetime.date.today().strftime("%B %Y")
+# Automatically calculate last month (e.g., September 2026 if current is October 2026)
+def get_last_month_str():
+    today = datetime.date.today()
+    first_day = today.replace(day=1)
+    last_month = first_day - datetime.timedelta(days=1)
+    return last_month.strftime("%B %Y")
 
 # Parse single receipt using Groq Vision API (Robust JSON cleaning)
 def parse_receipt_with_groq(image_bytes, api_key):
@@ -127,12 +129,12 @@ def generate_excel_claim(profile_data, claim_data_list):
     output.seek(0)
     return output
 
-current_month_value = get_current_month_str()
+last_month_value = get_last_month_str()
 
 # ==================== 1. Colleague Portal ====================
 if portal_mode == "👥 Colleague Portal":
     st.title("👥 Fuel Reimbursement Claim Form - Colleague Portal")
-    st.markdown("Please enter your personal details and **upload up to 20 receipt images**. The system will process them in batch and preview the extracted data below.")
+    st.markdown("Please enter your personal details and **upload up to 20 receipt images**. The system will process them at high speed and preview the extracted data below.")
 
     with st.form("colleague_form"):
         col1, col2 = st.columns(2)
@@ -145,11 +147,10 @@ if portal_mode == "👥 Colleague Portal":
             c_vehicle = st.text_input("Vehicle No.")
             c_limit = st.number_input("Monthly Claim Limit (RM)", value=500.0)
         
-        # Added unique key to prevent Streamlit session state caching issues
-        c_month = st.text_input("Claim for the Month of", value=current_month_value, key="colleague_month_input")
+        c_month = st.text_input("Claim for the Month of", value=last_month_value, key="colleague_month_input")
         uploaded_files = st.file_uploader("Upload Receipt Images (Multiple allowed, up to 20)", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
         
-        submitted = st.form_submit_button("🤖 Batch Process & Generate Claim")
+        submitted = st.form_submit_button("🤖 High-Speed Batch Process & Generate Claim")
 
     if submitted:
         if not groq_api_key:
@@ -160,7 +161,7 @@ if portal_mode == "👥 Colleague Portal":
             total_files = len(uploaded_files)
             extracted_claims = []
             
-            with st.status(f"Batch processing 0 / {total_files} receipts...", expanded=True) as status:
+            with st.status(f"Processing {total_files} receipts at high speed...", expanded=True) as status:
                 for i, file in enumerate(uploaded_files):
                     status.update(label=f"Processing receipt {i+1} of {total_files} ({file.name})...")
                     
@@ -174,8 +175,7 @@ if portal_mode == "👥 Colleague Portal":
                             "litres": float(receipt_info.get("litres", 0) or 0),
                             "amount_rm": float(receipt_info.get("amount_rm", 0) or 0)
                         })
-                    
-                    time.sleep(1)
+                    # Removed time.sleep to enable maximum speed
                 
                 status.update(label=f"Successfully processed all {total_files} receipts!", state="complete", expanded=False)
             
@@ -222,13 +222,12 @@ elif portal_mode == "🔑 Owner Portal":
             my_vehicle = st.text_input("Vehicle No.", value="VKG4113")
             my_limit = st.number_input("Monthly Claim Limit (RM)", value=800.0)
             
-        # Added unique key to prevent Streamlit session state caching issues
-        my_month = st.text_input("Claim for the Month of", value=current_month_value, key="owner_month_input")
+        my_month = st.text_input("Claim for the Month of", value=last_month_value, key="owner_month_input")
         
         st.markdown("---")
         my_uploaded_files = st.file_uploader("Upload Fuel Receipts (Multiple allowed, up to 20)", type=["jpg", "jpeg", "png"], accept_multiple_files=True, key="my_receipts")
         
-        if st.button("🚀 Batch Process My Receipts"):
+        if st.button("🚀 High-Speed Batch Process My Receipts"):
             if not groq_api_key:
                 st.error("Please configure your Groq API Key!")
             elif not my_uploaded_files:
@@ -237,7 +236,7 @@ elif portal_mode == "🔑 Owner Portal":
                 total_files = len(my_uploaded_files)
                 extracted_claims = []
                 
-                with st.status(f"Batch processing 0 / {total_files} receipts...", expanded=True) as status:
+                with st.status(f"Processing {total_files} receipts at high speed...", expanded=True) as status:
                     for i, file in enumerate(my_uploaded_files):
                         status.update(label=f"Processing receipt {i+1} of {total_files} ({file.name})...")
                         
@@ -251,8 +250,7 @@ elif portal_mode == "🔑 Owner Portal":
                                 "litres": float(receipt_info.get("litres", 0) or 0),
                                 "amount_rm": float(receipt_info.get("amount_rm", 0) or 0)
                             })
-                        
-                        time.sleep(1)
+                        # Removed time.sleep for maximum speed
                     
                     status.update(label=f"Successfully processed all {total_files} receipts!", state="complete", expanded=False)
                 
