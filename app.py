@@ -10,14 +10,14 @@ import datetime
 import time
 import re
 
-# 页面配置
+# Page Configuration
 st.set_page_config(
     page_title="Petrol Claim Portal",
     page_icon="⛽",
     layout="wide"
 )
 
-# 侧边栏：API Key 与页面选择
+# Sidebar: API Key and Portal Selection
 st.sidebar.title("⛽ Petrol Claim Portal")
 st.sidebar.markdown("---")
 
@@ -25,26 +25,26 @@ groq_api_key = ""
 if "GROQ_API_KEY" in st.secrets:
     groq_api_key = st.secrets["GROQ_API_KEY"]
 else:
-    groq_api_key = st.sidebar.text_input("Groq API Key", type="password", help="请从 console.groq.com 获取 API Key")
+    groq_api_key = st.sidebar.text_input("Groq API Key", type="password", help="Get your API Key from console.groq.com")
 
 st.sidebar.markdown("---")
-portal_mode = st.sidebar.radio("选择访问页面", ["👥 同事报销页面", "🔑 个人专属后台"])
+portal_mode = st.sidebar.radio("Select Portal", ["👥 Colleague Portal", "🔑 Owner Portal"])
 
-# 自动寻找 Excel 模板
+# Automatically find Excel template
 def get_template_path():
     xlsx_files = glob.glob("*.xlsx")
     if xlsx_files:
         return xlsx_files[0]
     return "Fuel Reimbursement Claim Form new- Original - Copy.xlsx.xlsx"
 
-# 自动计算上个月份
+# Automatically calculate last month
 def get_last_month_str():
     today = datetime.date.today()
     first_day = today.replace(day=1)
     last_month = first_day - datetime.timedelta(days=1)
     return last_month.strftime("%B %Y")
 
-# 带 429 自动重试与限速保护的解析函数（只提取 date, receipt_no, litres）
+# Parse receipt with rate limit handling & auto-retry (Extracting date, receipt_no, litres)
 def parse_receipt_with_groq(image_bytes, api_key):
     max_retries = 3
     for attempt in range(max_retries):
@@ -126,7 +126,7 @@ def parse_receipt_with_groq(image_bytes, api_key):
                 return {"date": "-", "receipt_no": f"Error: {error_msg[:30]}", "litres": 0.0}
     return {"date": "-", "receipt_no": "-", "litres": 0.0}
 
-# 生成 Excel 报销表（智能去重 + 严格按 1 litre = RM1.99 计算）
+# Generate Excel Claim File with smart deduplication and strict RM1.99 calculation
 def generate_excel_claim(profile_data, raw_claim_list):
     template_path = get_template_path()
     wb = openpyxl.load_workbook(template_path)
@@ -165,7 +165,7 @@ def generate_excel_claim(profile_data, raw_claim_list):
                 continue
             seen_transactions.add(signature)
         
-        # 核心：后台强制按 1 litre = RM1.99 计算金额
+        # Calculation: Amount = Litres * 1.99
         amount_rm = round(litres * 1.99, 2)
         
         unique_claims.append({
@@ -190,10 +190,10 @@ def generate_excel_claim(profile_data, raw_claim_list):
 
 last_month_value = get_last_month_str()
 
-# ==================== 1. 同事报销页面 ====================
-if portal_mode == "👥 同事报销页面":
-    st.title("👥 同事油费报销申请表")
-    st.markdown("请填写您的个人信息并上传多张收据。系统已内置限速保护，防止触发 429 频率限制。")
+# ==================== 1. Colleague Portal ====================
+if portal_mode == "👥 Colleague Portal":
+    st.title("👥 Fuel Reimbursement Claim Form - Colleague Portal")
+    st.markdown("Please enter your personal details and upload multiple receipt images. Built-in rate limit protection enabled.")
 
     with st.form("colleague_form"):
         col1, col2 = st.columns(2)
@@ -207,22 +207,22 @@ if portal_mode == "👥 同事报销页面":
             c_limit = st.number_input("Monthly Claim Limit (RM)", value=500.0)
         
         c_month = st.text_input("Claim for the Month of", value=last_month_value, key="colleague_month_input")
-        uploaded_files = st.file_uploader("上传多张收据图片 (支持多选，最多20张)", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+        uploaded_files = st.file_uploader("Upload Receipt Images (Multiple allowed, up to 20)", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
         
-        submitted = st.form_submit_button("🤖 批量智能识别并生成报销表")
+        submitted = st.form_submit_button("🤖 Batch Process & Generate Claim")
 
     if submitted:
         if not groq_api_key:
-            st.error("请先配置 Groq API Key！")
+            st.error("Please configure your Groq API Key first!")
         elif not uploaded_files:
-            st.error("请至少上传一张收据图片！")
+            st.error("Please upload at least one receipt image!")
         else:
             total_files = len(uploaded_files)
             raw_claims = []
             
-            with st.status(f"正在安全处理共 {total_files} 张收据（内置限速保护）...", expanded=True) as status:
+            with st.status(f"Processing {total_files} receipts securely (rate limit protection active)...", expanded=True) as status:
                 for i, file in enumerate(uploaded_files):
-                    status.update(label=f"正在处理第 {i+1} 张 / 共 {total_files} 张 ({file.name})...")
+                    status.update(label=f"Processing receipt {i+1} of {total_files} ({file.name})...")
                     
                     image_bytes = file.getvalue()
                     receipt_info = parse_receipt_with_groq(image_bytes, groq_api_key)
@@ -234,9 +234,9 @@ if portal_mode == "👥 同事报销页面":
                             "receipt_no": receipt_info.get("receipt_no", "-"),
                             "litres": receipt_info.get("litres", 0)
                         })
-                    time.sleep(2.5) # 限速保护
+                    time.sleep(2.5) # Rate limit delay
                 
-                status.update(label="处理完成！", state="complete", expanded=False)
+                status.update(label="Processing completed!", state="complete", expanded=False)
             
             st.session_state.raw_claims = raw_claims
             st.session_state.profile = {
@@ -250,8 +250,8 @@ if portal_mode == "👥 同事报销页面":
             }
 
     if "raw_claims" in st.session_state and st.session_state.raw_claims:
-        st.markdown("### 📊 批量识别明细预览与编辑")
-        st.info("💡 **提示**：如果某张收据信息有误，可直接在下方表格中点击修改，修改后会自动重新计算金额。")
+        st.markdown("### 📊 Batch Extraction Preview & Editor")
+        st.info("💡 **Tip**: If any extracted information is incorrect, you can directly click and edit the cells in the table below before downloading.")
         
         _, initial_processed = generate_excel_claim(st.session_state.profile, st.session_state.raw_claims)
         
@@ -266,22 +266,22 @@ if portal_mode == "👥 同事报销页面":
         excel_file, _ = generate_excel_claim(st.session_state.profile, final_claims)
         
         st.download_button(
-            label="📥 下载最终核对后的报销 Excel 表格",
+            label="📥 Download Final Verified Claim Excel Sheet",
             data=excel_file,
             file_name=f"Petrol_Claim_{st.session_state.profile['name']}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
-# ==================== 2. 个人专属后台 ====================
-elif portal_mode == "🔑 个人专属后台":
-    st.title("🔑 Soo Wai Wing 的专属报销后台")
+# ==================== 2. Owner Portal ====================
+elif portal_mode == "🔑 Owner Portal":
+    st.title("🔑 Owner Portal - Soo Wai Wing")
     
-    password = st.text_input("请输入访问密码", type="password")
+    password = st.text_input("Enter Access Password", type="password")
     
     if password == "P@ssw0rd":
-        st.success("密码验证成功！欢迎回来。")
+        st.success("Authentication successful! Welcome back.")
         
-        st.markdown("### 📋 预设档案信息")
+        st.markdown("### 📋 Preset Profile Information")
         col1, col2 = st.columns(2)
         with col1:
             my_name = st.text_input("Employee Name", value="SOO WAI WING")
@@ -295,20 +295,20 @@ elif portal_mode == "🔑 个人专属后台":
         my_month = st.text_input("Claim for the Month of", value=last_month_value, key="owner_month_input")
         
         st.markdown("---")
-        my_uploaded_files = st.file_uploader("上传多张油站收据 (支持多选，最多20张)", type=["jpg", "jpeg", "png"], accept_multiple_files=True, key="my_receipts")
+        my_uploaded_files = st.file_uploader("Upload Fuel Receipts (Multiple allowed, up to 20)", type=["jpg", "jpeg", "png"], accept_multiple_files=True, key="my_receipts")
         
-        if st.button("🚀 批量安全处理我的所有收据"):
+        if st.button("🚀 Batch Process My Receipts Securely"):
             if not groq_api_key:
-                st.error("请先配置 Groq API Key！")
+                st.error("Please configure your Groq API Key first!")
             elif not my_uploaded_files:
-                st.error("请至少上传一张收据！")
+                st.error("Please upload at least one receipt!")
             else:
                 total_files = len(my_uploaded_files)
                 raw_claims = []
                 
-                with st.status(f"正在安全处理共 {total_files} 张收据（内置限速保护）...", expanded=True) as status:
+                with st.status(f"Processing {total_files} receipts securely (rate limit protection active)...", expanded=True) as status:
                     for i, file in enumerate(my_uploaded_files):
-                        status.update(label=f"正在处理第 {i+1} 张 / 共 {total_files} 张 ({file.name})...")
+                        status.update(label=f"Processing receipt {i+1} of {total_files} ({file.name})...")
                         
                         image_bytes = file.getvalue()
                         receipt_info = parse_receipt_with_groq(image_bytes, groq_api_key)
@@ -320,9 +320,9 @@ elif portal_mode == "🔑 个人专属后台":
                                 "receipt_no": receipt_info.get("receipt_no", "-"),
                                 "litres": receipt_info.get("litres", 0)
                             })
-                        time.sleep(2.5) # 限速保护
+                        time.sleep(2.5) # Rate limit protection
                     
-                    status.update(label="处理完成！", state="complete", expanded=False)
+                    status.update(label="Processing completed!", state="complete", expanded=False)
                 
                 st.session_state.my_raw_claims = raw_claims
                 st.session_state.my_profile = {
@@ -336,8 +336,8 @@ elif portal_mode == "🔑 个人专属后台":
                 }
 
         if "my_raw_claims" in st.session_state and st.session_state.my_raw_claims:
-            st.markdown("### 📊 批量识别明细预览与编辑")
-            st.info("💡 **提示**：如果某张收据信息有误，可直接在下方表格中点击修改，修改后会自动重新计算金额。")
+            st.markdown("### 📊 Batch Extraction Preview & Editor")
+            st.info("💡 **Tip**: If any extracted information is incorrect, you can directly click and edit the cells in the table below before downloading.")
             
             _, initial_processed_my = generate_excel_claim(st.session_state.my_profile, st.session_state.my_raw_claims)
             
@@ -352,13 +352,13 @@ elif portal_mode == "🔑 个人专属后台":
             excel_file_my, _ = generate_excel_claim(st.session_state.my_profile, final_claims_my)
             
             st.download_button(
-                label="📥 下载我的专属报销 Excel 表格",
+                label="📥 Download My Verified Claim Excel",
                 data=excel_file_my,
                 file_name=f"Petrol_Claim_{st.session_state.my_profile['name']}_{st.session_state.my_profile['month']}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
             
     elif password != "":
-        st.error("密码错误！请重新输入。")
+        st.error("Incorrect password! Please try again.")
     else:
-        st.info("请输入密码以进入你的专属后台。")
+        st.info("Please enter the password to access your secure portal.")
